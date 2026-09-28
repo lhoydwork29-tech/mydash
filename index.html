@@ -156,6 +156,10 @@
             <header class="h-16 bg-white border-b border-slate-200 px-6 flex items-center justify-between z-10 shadow-xs">
                 <div class="flex items-center space-x-4">
                     <h2 id="topbar-title" class="text-lg font-bold text-slate-800">Dashboard Overview</h2>
+                    <span id="sync-status" class="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500" role="status" aria-live="polite" title="Connecting to shared dashboard storage">
+                        <i id="sync-status-icon" class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i>
+                        <span id="sync-status-text" class="hidden lg:inline">Connecting</span>
+                    </span>
                     <span id="live-clock-badge" class="hidden sm:inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100">
                         <i class="fa-regular fa-clock mr-1.5"></i> <span id="header-clock">--:--:--</span>
                     </span>
@@ -924,19 +928,41 @@
         }
 
         const syncClientId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+        let latestSaveRequest = 0;
+
+        function updateSyncStatus(label, state) {
+            const status = document.getElementById('sync-status');
+            const statusText = document.getElementById('sync-status-text');
+            const statusIcon = document.getElementById('sync-status-icon');
+            if (!status || !statusText || !statusIcon) return;
+
+            const styles = {
+                connected: ['text-emerald-700', 'fa-circle-check'],
+                saving: ['text-amber-700', 'fa-cloud-arrow-up'],
+                disconnected: ['text-red-700', 'fa-circle-exclamation']
+            };
+            const [colorClass, iconClass] = styles[state] || ['text-slate-500', 'fa-cloud'];
+            status.className = `inline-flex items-center gap-1.5 text-xs font-medium ${colorClass}`;
+            status.title = label;
+            statusText.textContent = label;
+            statusIcon.className = `fa-solid ${iconClass}`;
+        }
 
         async function loadState() {
+            updateSyncStatus('Loading shared data', 'saving');
             try {
                 const response = await fetch('/api/state');
                 if (!response.ok) throw new Error(`State request failed: ${response.status}`);
                 const { state } = await response.json();
                 if (state) {
                     appState = { ...appState, ...state };
+                    updateSyncStatus('Synced', 'connected');
                 } else {
                     saveState();
                 }
             } catch (e) {
                 console.error("Error loading shared state:", e);
+                updateSyncStatus('Not connected; changes are not being saved', 'disconnected');
             }
         }
 
@@ -944,17 +970,26 @@
             try {
                 ensureAllExchangeRates();
                 const state = JSON.stringify(appState);
+                const requestId = ++latestSaveRequest;
+                updateSyncStatus('Saving changes', 'saving');
                 fetch('/api/state', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json', 'X-Client-Id': syncClientId },
                     body: state,
                     keepalive: new TextEncoder().encode(state).byteLength <= 60 * 1024
+                }).then(response => {
+                    if (!response.ok) throw new Error(`State save failed: ${response.status}`);
+                    if (requestId === latestSaveRequest) updateSyncStatus('Synced', 'connected');
                 }).catch(e => {
                     console.error("Error saving shared state:", e);
-                    showToast("Changes could not be saved. Keep this page open and try again.", "error");
+                    if (requestId === latestSaveRequest) {
+                        updateSyncStatus('Not connected; changes are not being saved', 'disconnected');
+                        showToast("Changes could not be saved. Check the connection and try again.", "error");
+                    }
                 });
             } catch (e) {
                 console.error("Error preparing shared state:", e);
+                updateSyncStatus('Changes could not be saved', 'disconnected');
             }
         }
 
@@ -966,6 +1001,7 @@
             ensureAllExchangeRates();
             initThemeAndFont();
             renderAll();
+            updateSyncStatus('Synced', 'connected');
         };
 
         // Initialize on window load
