@@ -4,12 +4,15 @@ const path = require('node:path');
 
 const root = __dirname;
 const stateFile = process.env.DASHBOARD_STATE_FILE || path.join(root, 'data', 'dashboard-state.json');
+const serverId = `${process.pid}-${Date.now()}`;
 const host = process.env.HOST || '0.0.0.0';
 const requestedPort = process.env.PORT !== undefined ? Number(process.env.PORT) : 3000;
 const port = Number.isFinite(requestedPort) ? requestedPort : 3000;
-const eventClients = new Set();
 const maxBodyBytes = 5 * 1024 * 1024;
+const eventClients = new Set();
 let stateWriteQueue = Promise.resolve();
+let stateRevision = 0;
+let temporaryFileCounter = 0;
 
 function sendJson(response, status, value, requestMethod = 'GET') {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -41,12 +44,18 @@ async function readJsonBody(request) {
         }
         chunks.push(chunk);
     }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    try {
+        return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch {
+        const error = new Error('Request body must contain valid JSON.');
+        error.statusCode = 400;
+        throw error;
+    }
 }
 
 async function writeState(state) {
     await fs.mkdir(path.dirname(stateFile), { recursive: true });
-    const temporaryFile = `${stateFile}.${process.pid}.${Date.now()}.tmp`;
+    const temporaryFile = `${stateFile}.${process.pid}.${++temporaryFileCounter}.tmp`;
     await fs.writeFile(temporaryFile, JSON.stringify(state), { mode: 0o600 });
     await fs.rename(temporaryFile, stateFile);
 }
@@ -57,7 +66,7 @@ async function handleRequest(request, response) {
 
     if (url.pathname === '/api/state') {
         if (method === 'GET' || method === 'HEAD') {
-            sendJson(response, 200, { state: await readState() }, method);
+            sendJson(response, 200, { state: await readState(), revision: stateRevision, serverId }, method);
             return;
         }
         if (method === 'PUT') {
@@ -66,12 +75,19 @@ async function handleRequest(request, response) {
                 sendJson(response, 400, { error: 'State must be a JSON object.' }, method);
                 return;
             }
+
             const write = stateWriteQueue.then(() => writeState(state));
             stateWriteQueue = write.catch(() => {});
             await write;
-            const event = `data: ${JSON.stringify({ clientId: request.headers['x-client-id'] || null, state })}\n\n`;
-            for (const client of eventClients) client.write(event);
-            sendJson(response, 200, { ok: true }, method);
+            stateRevision += 1;
+            const update = JSON.stringify({
+                clientId: request.headers['x-client-id'] || null,
+                state,
+                revision: stateRevision,
+                serverId
+            });
+            for (const client of eventClients) client.write(`data: ${update}\n\n`);
+            sendJson(response, 200, { ok: true, revision: stateRevision, serverId }, method);
             return;
         }
         response.setHeader('Allow', 'GET, PUT, HEAD');
@@ -85,13 +101,14 @@ async function handleRequest(request, response) {
             'Cache-Control': 'no-cache, no-transform',
             'Connection': 'keep-alive'
         });
-        response.write(': connected\n\n');
+        const initialRevision = stateRevision;
         eventClients.add(response);
         const heartbeat = setInterval(() => response.write(': keep-alive\n\n'), 20000);
-        request.on('close', () => {
+        response.on('close', () => {
             clearInterval(heartbeat);
             eventClients.delete(response);
         });
+        response.write(`data: ${JSON.stringify({ state: await readState(), revision: initialRevision, serverId })}\n\n`);
         return;
     }
 
