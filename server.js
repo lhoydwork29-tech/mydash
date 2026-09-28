@@ -76,18 +76,41 @@ async function handleRequest(request, response) {
                 return;
             }
 
-            const write = stateWriteQueue.then(() => writeState(state));
-            stateWriteQueue = write.catch(() => {});
-            await write;
-            stateRevision += 1;
-            const update = JSON.stringify({
-                clientId: request.headers['x-client-id'] || null,
-                state,
-                revision: stateRevision,
-                serverId
+            const expectedVersion = request.headers['if-match'];
+            const write = stateWriteQueue.then(async () => {
+                if (expectedVersion !== `"${serverId}:${stateRevision}"`) {
+                    return {
+                        conflict: true,
+                        state: await readState(),
+                        revision: stateRevision,
+                        serverId
+                    };
+                }
+
+                await writeState(state);
+                stateRevision += 1;
+                const update = JSON.stringify({
+                    clientId: request.headers['x-client-id'] || null,
+                    state,
+                    revision: stateRevision,
+                    serverId
+                });
+                for (const client of eventClients) {
+                    try {
+                        client.write(`data: ${update}\n\n`);
+                    } catch (error) {
+                        console.error('Unable to notify a connected client:', error);
+                    }
+                }
+                return { ok: true, revision: stateRevision, serverId };
             });
-            for (const client of eventClients) client.write(`data: ${update}\n\n`);
-            sendJson(response, 200, { ok: true, revision: stateRevision, serverId }, method);
+            stateWriteQueue = write.catch(() => {});
+            const result = await write;
+            if (result.conflict) {
+                sendJson(response, 409, { ...result, error: 'Saved data changed. Load the latest version before saving.' }, method);
+                return;
+            }
+            sendJson(response, 200, result, method);
             return;
         }
         response.setHeader('Allow', 'GET, PUT, HEAD');
@@ -101,14 +124,13 @@ async function handleRequest(request, response) {
             'Cache-Control': 'no-cache, no-transform',
             'Connection': 'keep-alive'
         });
-        const initialRevision = stateRevision;
         eventClients.add(response);
         const heartbeat = setInterval(() => response.write(': keep-alive\n\n'), 20000);
         response.on('close', () => {
             clearInterval(heartbeat);
             eventClients.delete(response);
         });
-        response.write(`data: ${JSON.stringify({ state: await readState(), revision: initialRevision, serverId })}\n\n`);
+        response.write(`data: ${JSON.stringify({ state: await readState(), revision: stateRevision, serverId })}\n\n`);
         return;
     }
 

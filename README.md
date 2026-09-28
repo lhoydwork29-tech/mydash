@@ -8,6 +8,6 @@ Install Node.js, then start the dashboard server from this folder:
 npm start
 ```
 
-Open `http://localhost:3000` in your browser. Use that same URL in other browsers on this computer. The dashboard stores its shared data in `data/dashboard-state.json`, so edits remain after refreshes and closing the browser, and are shared with other browsers connected to this server.
+Open `http://localhost:3000` to use the dashboard. The Node server is the source of truth and saves changes in `data/dashboard-state.json`; it loads the latest saved data whenever the dashboard opens. Keep this server running and use its address from every browser or device that should access the same dashboard. For another device on the same network, use `http://<computer-LAN-IP>:3000` and allow network access to port `3000`.
 
-To use another device on the same network, open `http://<computer-LAN-IP>:3000` there instead. Keep the server running and allow network access to port `3000`. For access from outside that network, deploy the Node server somewhere reachable and configure persistent disk storage; static-only hosting and opening `index.html` directly do not provide shared persistence.
+The server sends updates to other open dashboard sessions and rejects saves based on an outdated version, so one device cannot silently overwrite newer server data. To keep data across server restarts or deployments, retain the `data` directory on persistent storage.
